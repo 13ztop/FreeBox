@@ -16,6 +16,11 @@ jobs:
             echo "::error::SYNC_TOKEN未设置"
             exit 1
           fi
+          
+          # 关键修复：始终设置 Telegram 相关变量
+          echo "BOT_TOKEN_PART=set" >> $GITHUB_ENV
+          echo "CHAT_ID=set" >> $GITHUB_ENV
+          
           echo "基本Secrets验证通过"
 
       # 步骤 2: 获取目标仓库默认分支
@@ -47,7 +52,6 @@ jobs:
       - name: Backup workflow files
         run: |
           mkdir -p /tmp/workflow-backup
-          # 备份当前工作流文件（使用绝对路径）
           if [ -d "$GITHUB_WORKSPACE/target-repo/.github/workflows" ]; then
             cp -r "$GITHUB_WORKSPACE/target-repo/.github/workflows" /tmp/workflow-backup/
             echo "工作流文件备份完成"
@@ -65,15 +69,14 @@ jobs:
       - name: Create backup directory
         run: mkdir -p /tmp/repo-backup
 
-      # 步骤 6: 识别需要保留的文件（确保包含工作流目录）
+      # 步骤 6: 识别需要保留的文件
       - name: Identify protected files
         id: find_protected
         run: |
-          # FreeBox需要保留的核心文件列表
           protected_files=(
             "README*.md"
             "LICENSE*"
-            ".github/workflows"  # 确保工作流目录被保护
+            ".github/workflows"
             "config"
             "custom.json"
             "*.properties"
@@ -82,24 +85,19 @@ jobs:
             ".gitignore"
           )
           
-          # 创建保留文件列表
           mkdir -p /tmp/repo-backup
           for pattern in "${protected_files[@]}"; do
             find target-repo -path "*/${pattern}" -print >> /tmp/repo-backup/protected-files.txt 2>/dev/null || true
           done
           
-          # 添加额外保留文件
           echo "target-repo/.github" >> /tmp/repo-backup/protected-files.txt
           
-          # 保存文件数量
           if [ -f /tmp/repo-backup/protected-files.txt ]; then
             protected_count=$(sort -u /tmp/repo-backup/protected-files.txt | wc -l)
             echo "protected_files_count=$protected_count" >> $GITHUB_OUTPUT
           else
             echo "protected_files_count=0" >> $GITHUB_OUTPUT
           fi
-          
-          echo "保护文件识别完成"
 
       # 步骤 7: 备份需要保留的文件
       - name: Backup protected content
@@ -116,8 +114,6 @@ jobs:
               fi
             done < <(sort -u /tmp/repo-backup/protected-files.txt)
           fi
-          
-          echo "保护文件备份完成"
 
       # 步骤 8: 获取源仓库版本信息
       - name: Get source repository version
@@ -163,12 +159,10 @@ jobs:
               fi
             done
           fi
-          echo "保护文件恢复完成"
 
-      # 关键修复：恢复工作流文件（使用完整路径）
+      # 关键修复：恢复工作流文件
       - name: Restore workflow files
         run: |
-          # 恢复原始备份的工作流文件
           if [ -d "/tmp/workflow-backup/workflows" ]; then
             mkdir -p "$GITHUB_WORKSPACE/target-repo/.github/workflows"
             cp -r /tmp/workflow-backup/workflows/* "$GITHUB_WORKSPACE/target-repo/.github/workflows/"
@@ -202,7 +196,6 @@ jobs:
             git commit -m "$commit_msg"
             git push origin HEAD:${{ env.DEFAULT_BRANCH }}
             echo "commit_msg=$commit_msg" >> $GITHUB_OUTPUT
-            echo "变更已成功推送"
           fi
 
       # 步骤 13: 清理临时文件
@@ -220,3 +213,26 @@ jobs:
           CURRENT_TIME_SHORT=$(TZ='Asia/Shanghai' date +'%H:%M %Z')
           echo "CURRENT_TIME=$CURRENT_TIME" >> $GITHUB_ENV
           echo "CURRENT_TIME_SHORT=$CURRENT_TIME_SHORT" >> $GITHUB_ENV
+
+      # 关键修复：Telegram 通知（简化条件）
+      - name: Telegram Notification
+        if: ${{ always() && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        uses: appleboy/telegram-action@v1.0.0
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          parse_mode: markdown
+          message: |
+            ${{ job.status == 'success' && '✅' || '‼️' }} *FreeBox 同步报告 | ${{ env.CURRENT_TIME_SHORT }}*
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            • **目标仓库**: [13ztop/FreeBox](https://github.com/13ztop/FreeBox)
+            • **源仓库**: [kknifer7/FreeBox@${{ steps.source_version.outputs.commit_hash }}](https://github.com/kknifer7/FreeBox/commit/${{ steps.source_version.outputs.full_hash }})
+            • **目标版本**: [13ztop/FreeBox@${{ env.TARGET_COMMIT }}](https://github.com/13ztop/FreeBox/commit/${{ env.TARGET_COMMIT }})
+            • **状态**: ${{ job.status == 'success' && '成功' || '失败' }}
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            ${{ steps.commit_push.outputs.changes_count && '• **变更文件**: ' + steps.commit_push.outputs.changes_count || '' }}
+            • **保留文件**: ${{ steps.find_protected.outputs.protected_files_count || '0' }}
+            • **运行时间**: ${{ env.CURRENT_TIME }}
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            ${{ job.status == 'success' && '✅ 同步已完成' || '🚨 同步过程遇到错误' }}
+            [查看工作流运行](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
