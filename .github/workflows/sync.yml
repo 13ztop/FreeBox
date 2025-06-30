@@ -18,18 +18,6 @@ jobs:
           fi
           echo "基本Secrets验证通过"
 
-      # 关键修复：提前备份工作流文件
-      - name: Backup workflow files
-        run: |
-          mkdir -p /tmp/workflow-backup
-          # 备份当前工作流文件
-          if [ -f .github/workflows/*.yml ]; then
-            cp .github/workflows/*.yml /tmp/workflow-backup/
-            echo "工作流文件备份完成"
-          else
-            echo "未找到工作流文件，可能是首次运行"
-          fi
-
       # 步骤 2: 获取目标仓库默认分支
       - name: Detect default branch
         id: branch_detector
@@ -54,6 +42,18 @@ jobs:
           path: target-repo
           ref: ${{ env.DEFAULT_BRANCH }}
           fetch-depth: 0
+
+      # 关键修复：在检出后立即备份工作流文件
+      - name: Backup workflow files
+        run: |
+          mkdir -p /tmp/workflow-backup
+          # 备份当前工作流文件（使用绝对路径）
+          if [ -d "$GITHUB_WORKSPACE/target-repo/.github/workflows" ]; then
+            cp -r "$GITHUB_WORKSPACE/target-repo/.github/workflows" /tmp/workflow-backup/
+            echo "工作流文件备份完成"
+          else
+            echo "未找到工作流文件，可能是首次运行"
+          fi
 
       # 步骤 4: 克隆源仓库 (kknifer7/FreeBox)
       - name: Clone source repo
@@ -165,14 +165,16 @@ jobs:
           fi
           echo "保护文件恢复完成"
 
-      # 关键修复：恢复工作流文件
+      # 关键修复：恢复工作流文件（使用完整路径）
       - name: Restore workflow files
         run: |
           # 恢复原始备份的工作流文件
-          if [ -d /tmp/workflow-backup ]; then
-            mkdir -p target-repo/.github/workflows
-            cp /tmp/workflow-backup/*.yml target-repo/.github/workflows/
+          if [ -d "/tmp/workflow-backup/workflows" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/target-repo/.github/workflows"
+            cp -r /tmp/workflow-backup/workflows/* "$GITHUB_WORKSPACE/target-repo/.github/workflows/"
             echo "工作流文件已恢复"
+          else
+            echo "没有工作流备份可恢复"
           fi
 
       # 步骤 12: 提交和推送变更
