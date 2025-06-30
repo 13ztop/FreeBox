@@ -17,9 +17,14 @@ jobs:
             exit 1
           fi
           
-          # 关键修复：始终设置 Telegram 相关变量
-          echo "BOT_TOKEN_PART=set" >> $GITHUB_ENV
-          echo "CHAT_ID=set" >> $GITHUB_ENV
+          # 设置 Telegram 启用标志
+          if [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ]; then
+            echo "TELEGRAM_ENABLED=true" >> $GITHUB_ENV
+            echo "Telegram通知已启用"
+          else
+            echo "TELEGRAM_ENABLED=false" >> $GITHUB_ENV
+            echo "Telegram通知未启用"
+          fi
           
           echo "基本Secrets验证通过"
 
@@ -182,6 +187,7 @@ jobs:
           
           if git diff-index --quiet HEAD --; then
             echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "changes_count=0" >> $GITHUB_OUTPUT
             echo "没有需要提交的变更"
           else
             changes_count=$(git diff --name-only HEAD | wc -l)
@@ -214,9 +220,9 @@ jobs:
           echo "CURRENT_TIME=$CURRENT_TIME" >> $GITHUB_ENV
           echo "CURRENT_TIME_SHORT=$CURRENT_TIME_SHORT" >> $GITHUB_ENV
 
-      # 关键修复：Telegram 通知（简化条件）
+      # 关键修复：Telegram 通知（使用环境变量）
       - name: Telegram Notification
-        if: ${{ always() && secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        if: ${{ always() && env.TELEGRAM_ENABLED == 'true' }}
         uses: appleboy/telegram-action@v1.0.0
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -230,8 +236,8 @@ jobs:
             • **目标版本**: [13ztop/FreeBox@${{ env.TARGET_COMMIT }}](https://github.com/13ztop/FreeBox/commit/${{ env.TARGET_COMMIT }})
             • **状态**: ${{ job.status == 'success' && '成功' || '失败' }}
             ━━━━━━━━━━━━━━━━━━━━━━━━
-            ${{ steps.commit_push.outputs.changes_count && '• **变更文件**: ' + steps.commit_push.outputs.changes_count || '' }}
-            • **保留文件**: ${{ steps.find_protected.outputs.protected_files_count || '0' }}
+            • **变更文件**: ${{ steps.commit_push.outputs.changes_count }}
+            • **保留文件**: ${{ steps.find_protected.outputs.protected_files_count }}
             • **运行时间**: ${{ env.CURRENT_TIME }}
             ━━━━━━━━━━━━━━━━━━━━━━━━
             ${{ job.status == 'success' && '✅ 同步已完成' || '🚨 同步过程遇到错误' }}
