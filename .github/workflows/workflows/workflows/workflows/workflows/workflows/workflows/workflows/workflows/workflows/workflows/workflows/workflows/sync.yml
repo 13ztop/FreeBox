@@ -1,0 +1,222 @@
+name: Auto Sync from kknifer7/FreeBox
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天UTC时间0点（北京时间8点）自动同步
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤 1: 验证必要的 Secrets
+      - name: Verify Secrets
+        run: |
+          if [ -z "${{ secrets.SYNC_TOKEN }}" ]; then
+            echo "::error::SYNC_TOKEN未设置"
+            exit 1
+          fi
+          echo "基本Secrets验证通过"
+
+      # 步骤 2: 获取目标仓库默认分支
+      - name: Detect default branch
+        id: branch_detector
+        run: |
+          DEFAULT_BRANCH=$(curl -s -H "Authorization: token ${{ secrets.SYNC_TOKEN }}" \
+          "https://api.github.com/repos/13ztop/FreeBox" | jq -r .default_branch)
+          
+          if [ -z "$DEFAULT_BRANCH" ] || [ "$DEFAULT_BRANCH" = "null" ]; then
+            echo "::warning::无法获取默认分支，使用备用分支'main'"
+            DEFAULT_BRANCH="main"
+          fi
+          
+          echo "Detected default branch: $DEFAULT_BRANCH"
+          echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+
+      # 步骤 3: 检出目标仓库 (13ztop/FreeBox)
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.SYNC_TOKEN }}
+          repository: 13ztop/FreeBox
+          path: target-repo
+          ref: ${{ env.DEFAULT_BRANCH }}
+          fetch-depth: 0
+
+      # 关键修复：在检出后立即备份工作流文件
+      - name: Backup workflow files
+        run: |
+          mkdir -p /tmp/workflow-backup
+          # 备份当前工作流文件（使用绝对路径）
+          if [ -d "$GITHUB_WORKSPACE/target-repo/.github/workflows" ]; then
+            cp -r "$GITHUB_WORKSPACE/target-repo/.github/workflows" /tmp/workflow-backup/
+            echo "工作流文件备份完成"
+          else
+            echo "未找到工作流文件，可能是首次运行"
+          fi
+
+      # 步骤 4: 克隆源仓库 (kknifer7/FreeBox)
+      - name: Clone source repo
+        run: |
+          git clone --depth 1 https://github.com/kknifer7/FreeBox.git source-repo
+          echo "源仓库 kknifer7/FreeBox 克隆完成"
+
+      # 步骤 5: 创建备份目录
+      - name: Create backup directory
+        run: mkdir -p /tmp/repo-backup
+
+      # 步骤 6: 识别需要保留的文件（确保包含工作流目录）
+      - name: Identify protected files
+        id: find_protected
+        run: |
+          # FreeBox需要保留的核心文件列表
+          protected_files=(
+            "README*.md"
+            "LICENSE*"
+            ".github/workflows"  # 确保工作流目录被保护
+            "config"
+            "custom.json"
+            "*.properties"
+            "local"
+            "cust"
+            ".gitignore"
+          )
+          
+          # 创建保留文件列表
+          mkdir -p /tmp/repo-backup
+          for pattern in "${protected_files[@]}"; do
+            find target-repo -path "*/${pattern}" -print >> /tmp/repo-backup/protected-files.txt 2>/dev/null || true
+          done
+          
+          # 添加额外保留文件
+          echo "target-repo/.github" >> /tmp/repo-backup/protected-files.txt
+          
+          # 保存文件数量
+          if [ -f /tmp/repo-backup/protected-files.txt ]; then
+            protected_count=$(sort -u /tmp/repo-backup/protected-files.txt | wc -l)
+            echo "protected_files_count=$protected_count" >> $GITHUB_OUTPUT
+          else
+            echo "protected_files_count=0" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "保护文件识别完成"
+
+      # 步骤 7: 备份需要保留的文件
+      - name: Backup protected content
+        run: |
+          mkdir -p /tmp/repo-backup/protected-files
+          
+          if [ -f /tmp/repo-backup/protected-files.txt ]; then
+            while read file; do
+              if [ -e "$file" ]; then
+                relative_path=${file#target-repo/}
+                parent_dir="/tmp/repo-backup/protected-files/$(dirname "$relative_path")"
+                mkdir -p "$parent_dir"
+                cp -r "$file" "/tmp/repo-backup/protected-files/$relative_path"
+              fi
+            done < <(sort -u /tmp/repo-backup/protected-files.txt)
+          fi
+          
+          echo "保护文件备份完成"
+
+      # 步骤 8: 获取源仓库版本信息
+      - name: Get source repository version
+        id: source_version
+        run: |
+          cd source-repo
+          echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "full_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "commit_date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      # 步骤 9: 获取目标仓库版本信息
+      - name: Get target repository commit
+        id: target_version
+        run: |
+          cd target-repo
+          echo "TARGET_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=${{ env.DEFAULT_BRANCH }}" >> $GITHUB_ENV
+
+      # 步骤 10: 执行同步操作
+      - name: Sync repositories
+        run: |
+          rsync -av --delete \
+            --exclude=.git \
+            --exclude-from=/tmp/repo-backup/protected-files.txt \
+            source-repo/ target-repo/
+          
+          echo "仓库内容同步完成"
+
+      # 步骤 11: 恢复保护文件
+      - name: Restore protected content
+        run: |
+          if [ -d /tmp/repo-backup/protected-files ]; then
+            cd /tmp/repo-backup/protected-files
+            find . -type f -o -type d | while read item; do
+              clean_item=${item#./}
+              target_path="$GITHUB_WORKSPACE/target-repo/$clean_item"
+              
+              if [ -d "$item" ]; then
+                mkdir -p "$target_path"
+              else
+                mkdir -p "$(dirname "$target_path")"
+                cp "$item" "$target_path"
+              fi
+            done
+          fi
+          echo "保护文件恢复完成"
+
+      # 关键修复：恢复工作流文件（使用完整路径）
+      - name: Restore workflow files
+        run: |
+          # 恢复原始备份的工作流文件
+          if [ -d "/tmp/workflow-backup/workflows" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/target-repo/.github/workflows"
+            cp -r /tmp/workflow-backup/workflows/* "$GITHUB_WORKSPACE/target-repo/.github/workflows/"
+            echo "工作流文件已恢复"
+          else
+            echo "没有工作流备份可恢复"
+          fi
+
+      # 步骤 12: 提交和推送变更
+      - name: Commit and push changes
+        id: commit_push
+        run: |
+          cd target-repo
+          git config user.name "GitHub Actions Sync"
+          git config user.email "actions@github.com"
+          git add -A
+          
+          if git diff-index --quiet HEAD --; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "没有需要提交的变更"
+          else
+            changes_count=$(git diff --name-only HEAD | wc -l)
+            echo "changes_count=$changes_count" >> $GITHUB_OUTPUT
+            
+            commit_msg="自动同步: 来自 kknifer7/FreeBox@${{ steps.source_version.outputs.commit_hash }}"
+            commit_msg+="\n\n更新 $changes_count 个文件"
+            if [ ${{ steps.find_protected.outputs.protected_files_count }} -gt 0 ]; then
+              commit_msg+=", 保留 ${{ steps.find_protected.outputs.protected_files_count }} 个保护文件"
+            fi
+            
+            git commit -m "$commit_msg"
+            git push origin HEAD:${{ env.DEFAULT_BRANCH }}
+            echo "commit_msg=$commit_msg" >> $GITHUB_OUTPUT
+            echo "变更已成功推送"
+          fi
+
+      # 步骤 13: 清理临时文件
+      - name: Cleanup
+        run: |
+          rm -rf source-repo
+          rm -rf /tmp/repo-backup
+          rm -rf /tmp/workflow-backup
+
+      # 步骤 14: 设置时区
+      - name: Set Shanghai time
+        id: set_time
+        run: |
+          CURRENT_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M %Z')
+          CURRENT_TIME_SHORT=$(TZ='Asia/Shanghai' date +'%H:%M %Z')
+          echo "CURRENT_TIME=$CURRENT_TIME" >> $GITHUB_ENV
+          echo "CURRENT_TIME_SHORT=$CURRENT_TIME_SHORT" >> $GITHUB_ENV
